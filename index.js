@@ -1,157 +1,175 @@
-// استيراد الحزم والملفات الضرورية
-import fs from "fs";
-import login from "./logins/fcax/fb-chat-api/index.js";
-import { listen } from "./listen/listen.js";
-import { commandMiddleware, eventMiddleware } from "./middleware/index.js";
-import sleep from "time-sleep";
-import { log, notifer } from "./logger/index.js";
-import gradient from "gradient-string";
-import config from "./KaguyaSetUp/config.js";
-import EventEmitter from "events";
-import axios from "axios";
-import semver from "semver";
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const moment = require("moment-timezone");
+const chalk = require("chalk");
+const CFonts = require("cfonts");
+const { spawn } = require("child_process");
+const axios = require("axios");
+const logger = require("./utils/log");
+const { updateToken } = require("./autoRefresh.js");
 
-class Kaguya extends EventEmitter {
-  constructor() {
-    super();
-    this.on("system:error", (err) => {
-      log([{ message: "[ ERROR ]: ", color: "red" }, { message: `Error! An error occurred: ${err}`, color: "white" }]);
-      process.exit(1);
-    });
-    this.currentConfig = config;
-    this.credentials = fs.readFileSync("./KaguyaSetUp/KaguyaState.json");
-    this.package = JSON.parse(fs.readFileSync("./package.json"));
-    this.checkCredentials();
-  }
+// ======================
+// CONFIGURATION (الإعدادات)
+// ======================
+const TIMEZONE = "Africa/Khartoum"; // توقيت السودان لضبط الجدولة بدقة
+const BOT_NAME = "KAIRUS V3";
+const PORT = process.env.PORT || 2006;
+// ضع رابط ريندر الخاص بك هنا كملاذ آمن لمنع النوم (مثال: https://kairus.onrender.com)
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`; 
 
-  checkCredentials() {
-    try {
-      const credentialsArray = JSON.parse(this.credentials);
-      if (!Array.isArray(credentialsArray) || credentialsArray.length === 0) {
-        this.emit("system:error", "Fill in appstate in KaguyaSetUp/KaguyaState.json!");
-        process.exit(0);
-      }
-    } catch (error) {
-      this.emit("system:error", "Cannot parse JSON credentials in KaguyaSetUp/KaguyaState.json");
-    }
-  }
-async checkVersion() {
-    try {
-        const pinkGradient = gradient(["#ff00ff", "#ff99ff"]); // تدرج لوني وردي
-        console.log(pinkGradient(`       
-█▄▀ ▄▀█ █▀▀ █░█ █▄█ ▄▀█
-█░█ █▀█ █▄█ █▄█ ░█░ █▀█
-`));
+// ======================
+// 🔒 Anti Duplicate (منع التكرار)
+// ======================
+const lockFile = path.join(__dirname, "bot.lock");
 
-        console.log(`${gradient(["#ff99ff", "#ff00ff"])("[ owner ]: ")} ${gradient("cyan", "pink")("HUSSEIN YACOUBI")}`);
-        console.log(`${gradient(["#ff99ff", "#ff00ff"])("[ Facebook ]: ")} ${gradient("cyan", "pink")("https://www.facebook.com/share/15EQBXgrmV/")}`);
-
-        const { data } = await axios.get("https://raw.githubusercontent.com/Tshukie/Kaguya-Pr0ject/master/package.json");
-        if (semver.lt(this.package.version, (data.version ??= this.package.version))) {
-            log([{ message: "[ SYSTEM ]: ", color: "yellow" }, { message: `New Update: contact the owner`, color: "white" }]);
-        }
-
-        this.emit("system:run"); // تشغيل النظام مباشرة بدون إطار متحرك
-    } catch (err) {
-        this.emit("system:error", err);
-    }
+if (fs.existsSync(lockFile)) {
+  console.log(chalk.red("⎔ [SYSTEM] Bot already running. Exiting..."));
+  process.exit(0);
 }
 
-  async loadComponents() {
-    let failedCount = 0;
+fs.writeFileSync(lockFile, process.pid.toString());
 
-    // تحميل الأوامر
-    try {
-      await commandMiddleware();
-      console.log(`✔ Loaded ${global.client.commands.size} commands.`);
-    } catch (err) {
-      failedCount++;
-      console.error(`❌ Failed to load commands: ${err.message}`);
-    }
+const cleanup = () => {
+  if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+};
+process.on("exit", cleanup);
+process.on("SIGINT", () => { cleanup(); process.exit(0); });
+process.on("SIGTERM", () => { cleanup(); process.exit(0); });
 
-    // تحميل الأحداث
-    try {
-      await eventMiddleware();
-      console.log(`✔ Loaded ${global.client.events.size} events.`);
-    } catch (err) {
-      failedCount++;
-      console.error(`❌ Failed to load events: ${err.message}`);
-    }
+// ======================
+// 🌐 Express Server & Smart Ping
+// ======================
+const app = express();
 
-    // طباعة ملخص التحميل
-    console.log("=".repeat(50));
-    console.log(`✔ Total commands loaded: ${global.client.commands.size}`);
-    console.log(`✔ Total events loaded: ${global.client.events.size}`);
-    if (failedCount > 0) {
-      console.log(`❌ Failed to load ${failedCount} component(s).`);
-    } else {
-      console.log("✔ All components loaded successfully!");
-    }
-    console.log("=".repeat(50));
+app.get("/", (req, res) => {
+  const currentServerTime = moment.tz(TIMEZONE).format("HH:mm:ss || DD/MM/YYYY");
+  res.send(`
+    <body style="background: #0d0e15; color: #00ffcc; font-family: monospace; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; margin: 0;">
+      <div style="border: 1px solid #00ffcc; padding: 30px; border-radius: 5px; box-shadow: 0 0 15px rgba(0, 255, 204, 0.2); text-align: center;">
+        <h1 style="letter-spacing: 5px; margin: 0 0 10px 0;">${BOT_NAME}</h1>
+        <p style="color: #888; margin: 0 0 20px 0;">STATUS: IMMORTAL RUNNING</p>
+        <p style="font-size: 1.2rem; border-top: 1px dashed #333; padding-top: 15px; margin: 0;">⚡ TIME: ${currentServerTime}</p>
+      </div>
+    </body>
+  `);
+});
+
+app.listen(PORT, () => {
+  console.log(chalk.gray(`│ `) + chalk.greenBright(`🌍 Cyber Server initialized on port: ${PORT}`));
+});
+
+// ======================
+// ⏰ Time & Day System
+// ======================
+const timeNow = moment.tz(TIMEZONE).format("HH:mm:ss || D/MM/YYYY");
+let dayName = moment.tz(TIMEZONE).format("dddd");
+
+const days = {
+  Sunday: "الأحد",
+  Monday: "الإثنين",
+  Tuesday: "الثلاثاء",
+  Wednesday: "الأربعاء",
+  Thursday: "الخميس",
+  Friday: "الجمعة",
+  Saturday: "السبت"
+};
+dayName = days[dayName] || dayName;
+
+// ======================
+// 🎨 Minimalist Intro (الهوية البصرية)
+// ======================
+CFonts.say("KAIRUS v3", {
+  font: "slick",
+  align: "center",
+  gradient: ["cyan", "magenta"]
+});
+
+console.log(
+  chalk.cyan(`◸──────────────────────────────────◹\n`) +
+  chalk.cyan(`  ⌬ SYSTEM: `) + chalk.white(`${BOT_NAME} Engine\n`) +
+  chalk.cyan(`  ⌬ TIME  : `) + chalk.white(`${timeNow}\n`) +
+  chalk.cyan(`  ⌬ DAY   : `) + chalk.white(`${dayName}\n`) +
+  chalk.cyan(`◺──────────────────────────────────◿\n`)
+);
+
+// ======================
+// 🤖 Start Bot (التحكم في العمليات)
+// ======================
+let botProcess = null;
+let failCount = 0;
+
+async function startBot(msg) {
+  if (msg) logger(msg, "SYSTEM");
+
+  // تحديث التوكن تلقائياً قبل الإقلاع
+  try {
+    await updateToken();
+  } catch (err) {
+    logger("Token generation failed, bypassing to avoid lock...", "WARN");
   }
 
-  start() {
-    setInterval(() => {
-      const t = process.uptime();
-      const [i, a, m] = [Math.floor(t / 3600), Math.floor((t % 3600) / 60), Math.floor(t % 60)].map((num) => (num < 10 ? "0" + num : num));
-      const formatMemoryUsage = (data) => `${Math.round((data / 1024 / 1024) * 100) / 100} MB`;
-      const memoryData = process.memoryUsage();
-      process.title = `Kaguya Project - Author: Arjhil Dacayanan - ${i}:${a}:${m} - External: ${formatMemoryUsage(memoryData.external)}`;
-    }, 1000);
-
-    (async () => {
-      global.client = {
-        commands: new Map(),
-        events: new Map(),
-        cooldowns: new Map(),
-        aliases: new Map(),
-        handler: {
-          reply: new Map(),
-          reactions: new Map(),
-        },
-        config: this.currentConfig,
-      };
-
-      await this.loadComponents(); // استدعاء دالة التحميل
-
-      this.checkVersion();
-
-      this.on("system:run", () => {
-        login({ appState: JSON.parse(this.credentials) }, async (err, api) => {
-          if (err) this.emit("system:error", err);
-
-          api.setOptions(this.currentConfig.options);
-
-          const listenMqtt = async () => {
-            try {
-              if (!listenMqtt.isListening) {
-                listenMqtt.isListening = true;
-                const mqtt = await api.listenMqtt(async (err, event) => {
-                  if (err) this.on("error", err);
-                  await listen({ api, event, client: global.client });
-                });
-                await sleep(this.currentConfig.mqtt_refresh);
-                notifer("[ MQTT ]", "Mqtt refresh in progress!");
-                log([{ message: "[ MQTT ]: ", color: "yellow" }, { message: `Refresh mqtt in progress!`, color: "white" }]);
-                await mqtt.stopListening();
-                await sleep(5000);
-                notifer("[ MQTT ]", "Refresh successful!");
-                log([{ message: "[ MQTT ]: ", color: "green" }, { message: `Refresh successful!`, color: "white" }]);
-                listenMqtt.isListening = false;
-              }
-              listenMqtt();
-            } catch (error) {
-              this.emit("system:error", error);
-            }
-          };
-
-          listenMqtt.isListening = false;
-          listenMqtt();
-        });
-      });
-    })();
+  failCount++;
+  if (failCount > 5) {
+    logger("Excessive crashes detected. Cooling down for 2 minutes...", "SYSTEM");
+    setTimeout(() => {
+      failCount = 0;
+      startBot("Retry After Cool-down");
+    }, 120000);
+    return;
   }
+
+  botProcess = spawn("node", ["main.bot.js"], {
+    cwd: __dirname,
+    stdio: "inherit",
+    shell: true
+  });
+
+  botProcess.on("close", (code) => {
+    console.log(chalk.gray(`│ `) + chalk.red(`🛑 Bot process closed with code (${code})`));
+    // إعادة تشغيل ذكية: لو قفل طبيعي (0) ينتظر 10 ثواني، لو كراش ينتظر 5 ثواني
+    setTimeout(() => startBot("Restarting Engine..."), code === 0 ? 10000 : 5000);
+  });
+
+  botProcess.on("error", (err) => {
+    logger("Process spawn error: " + err, "ERROR");
+    setTimeout(() => startBot("Restarting Engine via Error Handler"), 5000);
+  });
+  
+  botProcess.on("spawn", () => {
+    failCount = 0; // تصفير العداد عند النجاح
+  });
 }
 
-const KaguyaInstance = new Kaguya();
-KaguyaInstance.start();
+setTimeout(() => {
+  console.log(chalk.gray(`│ `) + chalk.cyan("🚀 Igniting Kairus Core..."));
+  startBot("STARTUP");
+}, 200);
+
+// ======================
+// ♻️ Self-Ping Anti-Sleep System (حل مشكلة ريندر)
+// ======================
+// نقوم بعمل بينج للرابط الخارجي كل 4 دقائق لمنع السيرفر من الدخول في وضع الخمول
+setInterval(() => {
+  if (RENDER_URL.includes("localhost") && process.env.RENDER_EXTERNAL_URL) {
+    // تحديث ديناميكي للرابط إذا تم رصده في البيئة لاحقاً
+    return;
+  }
+  axios.get(RENDER_URL)
+    .then(() => console.log(chalk.gray(`│ `) + chalk.dim(`⎔ [Self-Ping] Core keeping alive via external pulse.`)))
+    .catch(() => {});
+}, 4 * 60 * 1000);
+
+// فاحص لحالة العملية كل دقيقة لإعادة الإقلاع الفوري في حال توقف العملية الفرعية
+setInterval(() => {
+  if (!botProcess || botProcess.killed) {
+    startBot("Anti-Freeze Recovery");
+  }
+}, 60000);
+
+// إعادة تشغيل كاملة كل 24 ساعة لضمان استخراج توكن فريش ونقاء الذاكرة
+setTimeout(() => {
+  console.log(chalk.magenta("\n♻️ [24H RESET] Scheduled reboot for system optimization & fresh token generation."));
+  if (botProcess && !botProcess.killed) botProcess.kill('SIGTERM');
+  setTimeout(() => process.exit(0), 3000);
+}, 24 * 60 * 60 * 1000);
